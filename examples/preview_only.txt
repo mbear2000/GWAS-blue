@@ -1,0 +1,2 @@
+Accession	trait_preview_only
+EXAMPLE_NOT_A_REAL_SAMPLE	1

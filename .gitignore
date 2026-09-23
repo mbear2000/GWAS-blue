@@ -1,0 +1,6 @@
+launcher.lock
+__pycache__/
+*.log
+*.exit
+*.zip
+*.url

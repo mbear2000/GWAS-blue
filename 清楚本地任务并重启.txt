@@ -1,0 +1,38 @@
+# 1. 进入项目目录
+cd "F:\ai\松江陵水2022-2025年数据\gwas-web"
+
+# 2. 停掉当前所有 server.py
+Get-CimInstance Win32_Process |
+Where-Object { $_.CommandLine -like '*server.py*' } |
+ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+
+# 3. 检查是否还有残留
+Get-CimInstance Win32_Process |
+Where-Object { $_.CommandLine -like '*server.py*' } |
+Select-Object ProcessId, CommandLine
+
+Stop-Process -Id 21656 -Force
+
+# 4. 检查新 server.py 语法
+C:\Python314\python.exe -m py_compile server.py
+
+# 5. 启动
+C:\Python314\pythonw.exe server.py
+
+# 6. 确认只启动了一个
+Get-CimInstance Win32_Process |
+Where-Object { $_.CommandLine -like '*server.py*' } |
+Select-Object ProcessId, CommandLine
+
+# 7. 检查网页后端版本
+Invoke-RestMethod 'http://127.0.0.1:8765/api/config' |
+Select-Object version
+
+
+
+
+
+
+今日目录
+cd /data9/home/yzhao/GWAS_IRGSP1.0/GPallIndmiss20_UAV_549lines_5years_Re-fitting
+rm -rf .gwas-active

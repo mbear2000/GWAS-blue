@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>GWAS · 水稻分析工作台</title><link rel="stylesheet" href="/style.css"><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b615a'/%3E%3Cpath d='M8 23V15m8 8V7m8 16V11' stroke='white' stroke-width='3'/%3E%3C/svg%3E"><script src="/app.js" defer></script></head>
+<body><header><a class="brand" href="/">▥ <strong>GWAS</strong><span>水稻分析工作台</span></a><span class="local">本机运行 · IRGSP 1.0</span></header>
+<main><div class="intro"><div><p class="eyebrow">PHENOTYPE → ASSOCIATION → PEAK SNP</p><h1>同一目录，按批次追加分析。</h1><p>每次只计算、绘制和归档新上传表型对应的结果。</p></div><span class="tag">EMMAx / hIBS</span></div>
+<div class="bookmark"><span>固定入口：<a href="http://127.0.0.1:8765/" id="bookmarkUrl">http://127.0.0.1:8765/</a> · 按 Ctrl+D 收藏，登录 Windows 后可直接打开。</span></div>
+<div class="workspace"><section class="panel"><div class="panel-title"><h2>新建分析</h2><span>01 / 配置</span></div><form id="form">
+<label class="upload" id="drop"><span class="file-icon">↑</span><strong id="fileLabel">选择表型文件</strong><span>TXT、TSV 或 CSV · 最大 20 MB</span><input id="file" type="file" accept=".txt,.tsv,.csv" required aria-label="选择表型文件"></label>
+<fieldset><legend>分析群体</legend><div class="populations"><label><input type="radio" name="population" value="GPall" checked><strong>GPall</strong><span>全部群体</span></label><label><input type="radio" name="population" value="GPallInd"><strong>GPallInd</strong><span>籼稻群体</span></label><label><input type="radio" name="population" value="GPallJap"><strong>GPallJap</strong><span>粳稻群体</span></label></div></fieldset>
+<details class="batch-note"><summary>基因型数据源（可修改 / 按群体保存）</summary>
+<p>默认使用原有 miss20 数据。每次运行重新复制 TPED、kinship 和样本 list，可复用分析目录。更换基因型时请同时指定下面四项配套来源。{chr} 自动替换为 01–12。</p>
+<label class="field">数据版本<input id="source-version" required></label>
+<label class="field">样本 list 服务器路径<input id="source-sample" required></label>
+<label class="field">TPED 路径模板<input id="source-tped" required></label>
+<label class="field">Kinship 服务器路径<input id="source-kinship" required></label>
+<label class="field">MAF VCF 路径模板<input id="source-maf" required></label>
+<button type="button" class="secondary" id="resetSource">恢复当前群体默认来源</button>
+<p>TPED、kinship 复制到 tped，样本 list 复制到 phenotype，覆盖对应旧输入；MAF 直接使用指定路径。请保证四项数据和参考基因组配套。</p></details>
+<label class="field">远程目录名称（可复用）<input id="directory" placeholder="例如 GPallmiss20_UAV_549lines" pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,79}" maxlength="80" required><small id="remotePath">/data9/home/yzhao/GWAS_IRGSP1.0/…</small></label>
+<label class="field">本次标签<input id="label" placeholder="选择文件后自动填写，例如 LSH2023" pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,63}" maxlength="64"><small>已有 LSH2023_ 前缀的性状名直接保留；其余性状补上标签。需要另一次同年分析时可换新标签。</small></label>
+<label class="field">本地日志保存目录<input id="logDirectory" placeholder="例如 F:\ai\GWAS日志" required><small>填写已有目录；首次使用 表型文件前缀_GWASrun.log，重名时自动加本地时间后缀</small></label>
+<div class="batch-note"><strong id="batchLabel">本次批次：待选择表型文件</strong><p>仅使用本批新生成的 TPED 清单；每个性状验证 01–12 号染色体。已有标签不重复添加；预览可查看实际性状名和作业数量。</p><p>归档名示例：LSH2022_Re-fitting_20260920-0830，时间取进入20节点时的本机时间。.sh 与日志一同归档。队列每2分钟检查；全部分析成功后清理 EMMAx.Data、tped 直属文件，并打印完成提示、退出连接。</p></div>
+<p class="note">表型先上传至远程 phenotype 文件夹，再提取转换。同名表型不覆盖；日志重名自动加时间后缀，无需换文件夹。GWAS 与绘图均逐个提交，每次 qsub 后等待5秒。</p>
+<div class="actions"><button type="button" class="secondary" id="preview">预览流程</button><button type="submit" id="submit">提交并启动分析 <span>↗</span></button></div><p id="message" role="status" aria-live="polite"></p></form></section>
+<section class="panel progress"><div class="panel-title"><h2>运行进度</h2><span id="statusBadge">等待提交</span></div><div id="runInfo" class="run-info">提交后显示当前阶段和任务信息。</div>
+<ol id="steps"><li data-stage="prepare"><b>1</b><div><strong>准备数据与提取表型</strong><span>fat2 · 文件校验、复制与格式转换</span></div></li><li data-stage="admin"><b>2</b><div><strong>GWAS 队列计算</strong><span>10.10.1.20 · 逐作业退出码与结果校验</span></div></li><li data-stage="admin"><b>3</b><div><strong>绘图与日志检查</strong><span>检查队列完成，再归档计算日志</span></div></li><li data-stage="final"><b>4</b><div><strong>提取 peak SNP 与已知基因</strong><span>返回 fat2 · 生成 sigSNP 结果</span></div></li><li data-stage="complete"><b>✓</b><div><strong>分析结束，保存运行日志</strong><span>网页提示完成 · 本地日志自动更新</span></div></li></ol><div class="queue-note"><strong>怎样确认真正完成？</strong><p>每2分钟按本次作业ID检查状态；全部达到C后，检查对应日志中的error及结果文件。C仍显示在队列中也可继续；非零退出码或缺失结果会停止。</p></div></section></div>
+<section class="panel logs"><div class="panel-title"><h2>运行日志</h2><div><select id="history" aria-label="选择历史任务"><option value="">暂无任务</option></select><button class="text-button" id="download" disabled>下载日志</button></div></div><div id="recoveryHelp" hidden><p>连接超时不代表远程计算失败。先关闭 SecureCRT 的旧错误弹窗；如旧脚本仍在运行，先停止该脚本（不要取消队列作业），再点击下面按钮核实远程阶段。不会重复提交已启动的 GWAS。若提示非零退出码，请查看日志末尾 ERROR 并修复后处理。新分析可以使用不同工作目录。</p><button type="button" id="recover">重新连接并核实 / 继续</button></div><pre id="log" tabindex="0">尚未提交任务。可先预览完整流程；预览不会连接服务器或提交作业。</pre></section>
+<footer><span id="connection">正在检查本机连接…</span><span>请保持本机后台服务与 SecureCRT 运行；关闭网页不影响远程作业。</span></footer></main>
+<dialog id="previewDialog"><div class="panel-title"><h2>分析流程预览</h2><button id="closePreview" class="secondary">关闭</button></div><p id="previewInfo"></p><pre id="previewText"></pre></dialog></body></html>
