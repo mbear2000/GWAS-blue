@@ -102,7 +102,7 @@ if [[ $stage == prepare ]]; then
   echo "  TPED:       ${tped_template//\{chr\}/01} ... ${tped_template//\{chr\}/12} (12 chromosomes)"
   cp "$batch/data-source.txt" .gwas-data-source.txt
   printf '%s\n' "$pop" > .gwas-population
-  for tool in select.pheno.only.pl EMMAx-Step2.ChangetoEMMAxPhenotype.tfam.pl qsub_nodeAdmin.pl EMMAx.run-get.pValue.hIBS.pl plot_Allpicture_ofOneTrait.pl plot_manhattan.pl plot_manhattan_eachChr.pl plot_QQplot2023.pl stat.allSNPSignificantPos.inOneDir.list.pl; do
+  for tool in select.pheno.only.pl EMMAx-Step2.ChangetoEMMAxPhenotype.tfam.pl qsub_nodeAdmin.pl EMMAx.run-get.pValue.hIBS.pl plot_Allpicture_ofOneTrait.pl plot_manhattan.pl plot_manhattan_eachChr.pl plot_QQplot2023.pl stat.allSNPSignificantPos.inOneDir.list.pl get_genomicInflationFactor.py; do
     [[ -s $batch/program/$tool ]] || die "Missing batch program/$tool"
   done
   # Empty conversion workspace isolates this upload, including duplicate trait headers.
@@ -402,6 +402,50 @@ elif [[ $stage == final ]]; then
     ln -sfn "$dest/$name.hIBS" "$final/EMMAx.Result/hIBS/$name.hIBS"
   done < "$manifest"
   cp "$manifest" "$batch/traits.txt" "$dest/"
+
+  echo '===== GENOMIC INFLATION FACTOR ====='
+  inflation_script="$batch/program/get_genomicInflationFactor.py"
+  [[ -s "$inflation_script" ]] || die "Missing genomic inflation program: $inflation_script"
+
+  conda_sh=""
+  for candidate in \
+      "$HOME/miniconda3/etc/profile.d/conda.sh" \
+      "$HOME/anaconda3/etc/profile.d/conda.sh" \
+      "/public/home/yzhao/miniconda3/etc/profile.d/conda.sh" \
+      "/public/home/yzhao/anaconda3/etc/profile.d/conda.sh"; do
+    if [[ -s "$candidate" ]]; then
+      conda_sh="$candidate"
+      break
+    fi
+  done
+  [[ -n "$conda_sh" ]] || die 'Cannot find conda.sh for genomic inflation calculation'
+  source "$conda_sh"
+  conda activate || die 'Cannot run conda activate for genomic inflation calculation'
+  echo "INFLATION_CONDA: conda activate"
+
+  inflation_dir="$dest/inflationFactor"
+  mkdir -p "$inflation_dir"
+
+  while read -r trait; do
+    ps_pattern="$dest/output/${trait}_chr01_hIBS.ps"
+    inflation_out="$inflation_dir/${trait}.inflationFactor"
+
+    echo "INFLATION_FACTOR_START: $trait"
+    echo "INFLATION_FACTOR_INPUT: $ps_pattern"
+    echo "INFLATION_FACTOR_OUTPUT: $inflation_out"
+
+    [[ -s "$ps_pattern" ]] || die "Missing chr01 EMMAX ps file for $trait: $ps_pattern"
+
+    python "$inflation_script" "$ps_pattern" "$inflation_out" \
+      || die "Genomic inflation calculation failed for trait: $trait"
+
+    [[ -s "$inflation_out" ]] || die "Empty inflation factor output for trait: $trait"
+    echo "INFLATION_FACTOR_DONE: $trait"
+  done < "$batch/traits.txt"
+
+  conda deactivate || true
+  echo "INFLATION_FACTOR_ALL_DONE: $inflation_dir"
+
   # A recovered older batch may have archived queue logs under the old name.
   old_archive="${stem}__${runid}"
   for phase in emmax plot; do

@@ -1,6 +1,5 @@
-launcher.lock
 __pycache__/
 *.log
 *.exit
+*.lock
 *.zip
-*.url
