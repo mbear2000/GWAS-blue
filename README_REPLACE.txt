@@ -1,4 +1,4 @@
-GWAS-submit BLUE 完整替换版 v9.2
+GWAS-submit BLUE 完整替换版 v9.9
 ==============================
 
 本版主要统一 BLUE 命名，不改变已经跑通的 BLUE / GWAS 核心分析逻辑。
@@ -294,3 +294,182 @@ Windows 本地不上传这两个 R 程序。
     README_REPLACE.txt
 
 可以直接解压覆盖测试目录。
+
+
+十六、v9.3 conda 激活修复
+------------------------
+
+不再查找固定 conda.sh 路径。
+
+膨胀系数最后一步通过交互式 bash 启动：
+
+    bash -ic
+
+在该 shell 中直接执行：
+
+    conda activate
+
+从而复用用户登录 fat2 后已经生效的 conda 初始化配置。
+
+
+十七、v9.4 inflation factor 卡住修复
+-----------------------------------
+
+v9.3 使用：
+
+    bash -ic "bash run_inflation_factor.sh ..."
+
+会让一个交互式 shell 在 SecureCRT/PTTY 环境中长时间占用当前会话，
+可能导致网页控制端不断发送状态标记，而 inflation 计算没有真正开始。
+
+v9.4 改为：
+
+1. 仅用一个最长 30 秒的交互式 bash 查询一次：
+
+       conda activate
+       command -v python
+
+2. 得到 conda 激活后真正使用的 Python 路径。
+
+3. 检查该 Python 能 import numpy 和 scipy。
+
+4. 返回普通非交互 workflow，用该 Python 逐 trait 运行：
+
+       get_genomicInflationFactor.py
+
+不再让整个 inflation 计算运行在 bash -ic 中。
+
+inflationFactor 目录位置不是项目根目录，而是：
+
+    <project>/EMMAx.Result/hIBS/<archive>/inflationFactor/
+
+例如：
+
+    <project>/EMMAx.Result/hIBS/GPallInd_LocYear_blue/inflationFactor/
+
+
+十八、v9.5 inflationFactor 输出目录与 conda base
+------------------------------------------------
+
+膨胀系数输出目录改为当前项目根目录：
+
+    <project>/inflationFactor/
+
+例如：
+
+    /data9/home/yzhao/GWAS_IRGSP1.0/GPallIndmiss20_UAV_549lines_5years_Re-fitting_Blue/inflationFactor/
+
+每个性状输出：
+
+    <project>/inflationFactor/<trait>.inflationFactor
+
+运行膨胀系数之前，在 fat2 的交互式 shell 中明确执行：
+
+    conda activate base
+
+然后读取该 base 环境中的 Python 路径：
+
+    command -v python
+
+确认 Python 能加载 numpy 和 scipy 后，再返回普通 workflow 批量运行
+get_genomicInflationFactor.py。
+
+这样不会让整个 inflation 计算长期占用交互式 bash，但可以保证实际使用
+conda base 环境中的 Python。
+
+
+十九、v9.6 inflation 卡住修复 + inflation-only
+----------------------------------------------
+
+1. 不再使用 bash -ic。
+   直接利用登录环境中导出的 CONDA_EXE：
+
+       eval "$("$CONDA_EXE" shell.bash hook)"
+       conda activate base
+
+   然后用 base 环境 Python 运行 get_genomicInflationFactor.py。
+
+2. 新增 workflow_v2.sh 的 inflation stage。
+   如果此前 GWAS 已经生成并归档了所有 .ps 文件，不需要重跑
+   prepare / qsub / plot / peak SNP。
+
+   例如 BLUE 结果归档为：
+
+       EMMAx.Result/hIBS/GPallInd_LocYear_blue/
+
+   可直接运行：
+
+       bash workflow_v2.sh inflation \
+         GPallInd \
+         GPallIndmiss20_UAV_549lines_5years_Re-fitting_Blue \
+         GPallInd_LocYear_blue.txt \
+         inflation-recovery \
+         LocYear-blue
+
+   它读取：
+
+       EMMAx.Result/hIBS/GPallInd_LocYear_blue/traits.txt
+       EMMAx.Result/hIBS/GPallInd_LocYear_blue/output/*_chr01_hIBS.ps
+
+   并直接生成：
+
+       <project>/inflationFactor/*.inflationFactor
+
+3. 如果归档 output 或 traits.txt 缺失，会直接报错，不会自动从头重跑。
+
+
+二十、v9.7 网页 inflation-only 与本地停止
+-----------------------------------------
+
+- 历史任务新增“只计算膨胀系数（使用已有 .ps）”按钮。
+  它创建新的 inflation-only 恢复任务，直接读取已有归档 output/*.ps，
+  不重新运行 prepare / qsub / EMMAX / plot / peak SNP。
+
+- 新增“停止本地监控 / 清除运行状态”按钮。
+  只清理 Windows 网页状态，不会自动 qdel PBS，也不会删除服务器结果。
+
+- stop_blue.cmd 现在会自动扫描 runs/*/state.txt，
+  将 connecting/running 改为 cancelled，并写入 cancelled.flag。
+  不需要再手工 PowerShell 修改 state.txt。
+
+- inflation-only 使用新的 run id，避免旧卡住的 SecureCRT 监控覆盖新任务状态。
+
+
+二十一、v9.8 inflation Python 固定路径 + VBS 修复
+-------------------------------------------------
+
+- 不再使用 conda activate。
+- fat2 固定使用：
+  /data6/tool/anaconda2-4.1.1/bin/python
+- inflation-only 会从服务器 canonical program 目录：
+  /data9/home/yzhao/GWAS_IRGSP1.0/000data_prepare/program/get_genomicInflationFactor.py
+  复制到当前恢复 run 的 program 目录后运行。
+- 正常完整 GWAS/BLUE final 使用 prepare 阶段已经复制到 batch/program 的同一程序。
+- 修复 v9.7 inflation-only bridge.vbs 的 VBScript “无效字符”错误。
+- 输出仍为：
+  <project>/inflationFactor/
+
+
+二十二、v9.9 单文件原始 GWAS 修复
+--------------------------------
+
+问题：
+    单个地点/单个年份/单个表型文件时，workflow_blue_v8.sh 会按设计
+    委托给原始 workflow_v2.sh。
+
+    v9.8 的 server_blue.py 只在 BLUE 多文件 bundle 中上传 workflow_v2.sh，
+    单文件路径提前 return，导致远程报：
+
+        ERROR: missing remote workflow_v2.sh
+
+修复：
+    单文件提交时也自动把本地原始 workflow_v2.sh 上传到本次远程 staging：
+
+        /data9/home/yzhao/GWAS_IRGSP1.0/.gwas-web/<runid>/workflow_v2.sh
+
+    然后 workflow_blue_v8.sh 正常委托给原始单表型 GWAS 流程。
+
+多文件 BLUE 逻辑不变：
+    仍上传 BLUE-aware patched workflow_v2.sh。
+
+inflation-only、固定 Python、网页停止按钮等 v9.8 功能全部保留。

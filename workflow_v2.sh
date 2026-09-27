@@ -53,6 +53,67 @@ if [[ -f $staging/data-source.txt ]]; then
   tped_template=${source_fields[2]}; kin_source=${source_fields[3]}; maf_template=${source_fields[4]}
 fi
 source_path() { local template=$1; printf '%s' "${template//\{chr\}/$2}"; }
+if [[ $stage == inflation ]]; then
+  work="$BASE/$folder"
+  archive_dir="$work/EMMAx.Result/hIBS/$stem"
+  output_dir="$archive_dir/output"
+  traits_file="$archive_dir/traits.txt"
+  canonical_inflation_script="$BASE/000data_prepare/program/get_genomicInflationFactor.py"
+  inflation_program_dir="$work/.gwas-runs/$runid/program"
+  inflation_script="$inflation_program_dir/get_genomicInflationFactor.py"
+  inflation_python="/data6/tool/anaconda2-4.1.1/bin/python"
+  inflation_dir="$work/inflationFactor"
+
+  echo "============================================================"
+  echo "INFLATION_ONLY_START"
+  echo "PROJECT_DIR: $work"
+  echo "RESULT_ARCHIVE: $archive_dir"
+  echo "INFLATION_DIR: $inflation_dir"
+  echo "INFLATION_PYTHON: $inflation_python"
+  echo "============================================================"
+
+  [[ -d "$output_dir" ]] || die "Missing archived EMMAX output directory: $output_dir"
+  [[ -s "$traits_file" ]] || die "Missing archived trait list: $traits_file"
+  [[ -s "$canonical_inflation_script" ]] \
+    || die "Missing genomic inflation program: $canonical_inflation_script"
+  [[ -x "$inflation_python" ]] \
+    || die "Missing inflation Python: $inflation_python"
+
+  mkdir -p "$inflation_dir" "$inflation_program_dir"
+  cp -f "$canonical_inflation_script" "$inflation_script"
+  [[ -s "$inflation_script" ]] \
+    || die "Failed to copy genomic inflation program to: $inflation_script"
+
+  echo "INFLATION_PROGRAM_SOURCE: $canonical_inflation_script"
+  echo "INFLATION_PROGRAM_READY: $inflation_script"
+
+  "$inflation_python" -c 'import numpy, scipy' \
+    || die "Inflation Python is missing numpy/scipy: $inflation_python"
+
+  while read -r trait; do
+    ps_pattern="$output_dir/${trait}_chr01_hIBS.ps"
+    inflation_out="$inflation_dir/${trait}.inflationFactor"
+
+    echo "INFLATION_FACTOR_START: $trait"
+    echo "INFLATION_FACTOR_INPUT: $ps_pattern"
+    echo "INFLATION_FACTOR_OUTPUT: $inflation_out"
+
+    [[ -s "$ps_pattern" ]] \
+      || die "Missing chr01 EMMAX ps file for $trait: $ps_pattern"
+
+    "$inflation_python" "$inflation_script" "$ps_pattern" "$inflation_out" \
+      || die "Genomic inflation calculation failed for trait: $trait"
+
+    [[ -s "$inflation_out" ]] \
+      || die "Empty inflation factor output for trait: $trait"
+    echo "INFLATION_FACTOR_DONE: $trait"
+  done < "$traits_file"
+
+  echo "INFLATION_FACTOR_ALL_DONE: $inflation_dir"
+  echo "SUCCESS: inflation factor calculation completed from archived EMMAX ps files"
+  exit 0
+fi
+
 if [[ $stage == prepare ]]; then
   mkdir -p "$work"
   mkdir "$lock" || die 'Another run or unresolved failure owns this directory; inspect .gwas-active'
@@ -407,24 +468,16 @@ elif [[ $stage == final ]]; then
   inflation_script="$batch/program/get_genomicInflationFactor.py"
   [[ -s "$inflation_script" ]] || die "Missing genomic inflation program: $inflation_script"
 
-  conda_sh=""
-  for candidate in \
-      "$HOME/miniconda3/etc/profile.d/conda.sh" \
-      "$HOME/anaconda3/etc/profile.d/conda.sh" \
-      "/public/home/yzhao/miniconda3/etc/profile.d/conda.sh" \
-      "/public/home/yzhao/anaconda3/etc/profile.d/conda.sh"; do
-    if [[ -s "$candidate" ]]; then
-      conda_sh="$candidate"
-      break
-    fi
-  done
-  [[ -n "$conda_sh" ]] || die 'Cannot find conda.sh for genomic inflation calculation'
-  source "$conda_sh"
-  conda activate || die 'Cannot run conda activate for genomic inflation calculation'
-  echo "INFLATION_CONDA: conda activate"
-
-  inflation_dir="$dest/inflationFactor"
+  inflation_dir="$work/inflationFactor"
   mkdir -p "$inflation_dir"
+
+  inflation_python="/data6/tool/anaconda2-4.1.1/bin/python"
+  [[ -x "$inflation_python" ]] \
+    || die "Missing inflation Python: $inflation_python"
+
+  echo "INFLATION_PYTHON: $inflation_python"
+  "$inflation_python" -c 'import numpy, scipy' \
+    || die "Inflation Python is missing numpy/scipy: $inflation_python"
 
   while read -r trait; do
     ps_pattern="$dest/output/${trait}_chr01_hIBS.ps"
@@ -434,16 +487,18 @@ elif [[ $stage == final ]]; then
     echo "INFLATION_FACTOR_INPUT: $ps_pattern"
     echo "INFLATION_FACTOR_OUTPUT: $inflation_out"
 
-    [[ -s "$ps_pattern" ]] || die "Missing chr01 EMMAX ps file for $trait: $ps_pattern"
+    [[ -s "$ps_pattern" ]] \
+      || die "Missing chr01 EMMAX ps file for $trait: $ps_pattern"
 
-    python "$inflation_script" "$ps_pattern" "$inflation_out" \
+    "$inflation_python" "$inflation_script" "$ps_pattern" "$inflation_out" \
       || die "Genomic inflation calculation failed for trait: $trait"
 
-    [[ -s "$inflation_out" ]] || die "Empty inflation factor output for trait: $trait"
+    [[ -s "$inflation_out" ]] \
+      || die "Empty inflation factor output for trait: $trait"
+
     echo "INFLATION_FACTOR_DONE: $trait"
   done < "$batch/traits.txt"
 
-  conda deactivate || true
   echo "INFLATION_FACTOR_ALL_DONE: $inflation_dir"
 
   # A recovered older batch may have archived queue logs under the old name.

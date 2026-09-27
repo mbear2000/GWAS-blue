@@ -5,7 +5,7 @@ cd /d "%~dp0"
 set GWAS_WEB_PORT=8766
 
 echo.
-echo GWAS BLUE complete v9.2
+echo GWAS BLUE complete v9.9
 echo http://127.0.0.1:8766/
 echo.
 echo Required original files:

@@ -34,7 +34,11 @@ data-source paths differ.
 
 import base64
 import csv
+import json
 import re
+import secrets
+import subprocess
+import time
 from pathlib import Path
 
 import server as core
@@ -47,6 +51,7 @@ ORIGINAL_VALIDATE = core.validate
 ORIGINAL_BATCH_LABEL = core.batch_label
 ORIGINAL_PHENOTYPE_TRAITS = core.phenotype_traits
 ORIGINAL_BRIDGE_SCRIPT = core.bridge_script
+ORIGINAL_SNAPSHOT = core.snapshot
 
 BUNDLE_MAGIC = b"#GWAS_BLUE_BUNDLE_V4\n"
 MAX_FILE = 20 * 1024 * 1024
@@ -613,12 +618,40 @@ def bridge_script(run, pop, folder, filename, label=None, source=None):
     )
     uploaded = (run / "phenotype.upload").read_bytes()
     parsed = _parse_bundle(uploaded)
-    if parsed is None:
-        return script
 
     q = core.shlex.quote
     work = core.BASE + "/" + folder
     remote = core.BASE + "/.gwas-web/" + run.name
+
+    # Single-phenotype mode still runs through workflow_blue_v8.sh.
+    # That wrapper delegates one-file analysis to a sibling workflow_v2.sh,
+    # so the original workflow_v2.sh must also be uploaded for single-file
+    # submissions. Previous versions only uploaded it for BLUE bundles.
+    if parsed is None:
+        if not ORIGINAL_WORKFLOW.is_file():
+            raise RuntimeError("本地缺少 workflow_v2.sh")
+
+        blocks = [
+            "  Call Status(" + core.vb("Uploading original workflow_v2.sh") + ")"
+        ]
+        for command in _upload_bytes_commands(
+            remote + "/workflow_v2.sh",
+            ORIGINAL_WORKFLOW.read_bytes(),
+        ):
+            blocks.append(
+                "  Call ExecChecked(" + core.vb(command) + ")"
+            )
+
+        marker = '  Call Status("Starting prepare stage")'
+        if marker not in script:
+            raise RuntimeError("无法定位 prepare 启动位置")
+
+        script = script.replace(
+            marker,
+            "\n".join(blocks) + "\n" + marker,
+            1,
+        )
+        return script
 
     # One overwrite confirmation for all uploaded inputs and all selected
     # BLUE outputs.
@@ -709,11 +742,197 @@ def bridge_script(run, pop, folder, filename, label=None, source=None):
     return script
 
 
+
+def _local_state_text(run):
+    path = run / "state.txt"
+    if not path.exists():
+        return ""
+    try:
+        raw = path.read_bytes()
+        enc = "utf-16" if raw.startswith((b"\\xff\\xfe", b"\\xfe\\xff")) else "utf-8-sig"
+        return raw.decode(enc, errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def blue_snapshot(run):
+    snap = ORIGINAL_SNAPSHOT(run)
+    flag = run / "cancelled.flag"
+    if flag.exists():
+        try:
+            reason = flag.read_text("utf-8").strip()
+        except OSError:
+            reason = ""
+        snap["status"] = "cancelled"
+        snap["detail"] = reason or "用户已停止本地网页监控；远程队列/进程未自动 qdel。"
+    return snap
+
+
+def _inflation_bridge_script(run, meta):
+    pop = meta["population"]
+    folder = meta["directory"]
+    filename = meta["filename"]
+    label = meta.get("label") or Path(filename).stem
+    source = meta.get("dataSource")
+
+    s = ORIGINAL_BRIDGE_SCRIPT(run, pop, folder, filename, label, source)
+
+    q = core.shlex.quote
+    remote = core.BASE + "/.gwas-web/" + run.name
+    workflow_remote = remote + "/workflow_inflation.sh"
+
+    upload_lines = []
+    payload = ORIGINAL_WORKFLOW.read_bytes()
+    for command in _upload_bytes_commands(workflow_remote, payload):
+        upload_lines.append("  Call ExecChecked(" + core.vb(command) + ")")
+    uploads = "\n".join(upload_lines)
+
+    cmd = " ".join(
+        q(x) for x in [
+            "bash", workflow_remote, "inflation", pop, folder,
+            filename, run.name, label
+        ]
+    )
+    launch = "nohup " + cmd + " </dev/null >/dev/null 2>&1 &"
+
+    main = (
+        'Sub Main\n'
+        '  Call Save("state.txt", "connecting|admin2 -> fat2；准备仅计算膨胀系数")\n'
+        '  Set tab = crt.Session.ConnectInTab("/S admin2")\n'
+        '  tab.Screen.Synchronous = True\n'
+        '  tab.Screen.IgnoreEscape = True\n'
+        '  Call PromptReady()\n'
+        '  Call QuietPrompt("Connected to admin2")\n\n'
+        '  tab.Screen.Send "ssh fat2" & vbCr\n'
+        '  Call PromptReady()\n'
+        '  Call QuietPrompt("Connected to fat2")\n'
+        + '  Call ExecChecked("test $(id -un) = yzhao && test $(hostname -s) = fat2 && test -d ' + core.BASE + '")\n\n'
+        '  Call Progress("Inflation-only recovery: existing archived .ps files will be reused")\n'
+        + '  Call ExecChecked("mkdir -p ' + remote + '")\n'
+        + uploads + '\n'
+        + '  Call ExecChecked("rm -f ' + remote + '/inflation.exit")\n'
+        + '  Call Stage("inflation", ' + core.vb(launch) + ')\n'
+        '  Call Save("state.txt", "complete|膨胀系数计算完成；未重新运行 prepare/qsub/plot/GWAS")\n'
+        '  Call Progress("Inflation factor calculation completed successfully")\n'
+        '  tab.Screen.Send "stty echo; exit" & vbCr\n'
+        'End Sub'
+    )
+
+    begin = s.index("Sub Main")
+    end = s.index("\nEnd Sub", begin) + len("\nEnd Sub")
+    return s[:begin] + main + s[end:]
+
+
+class BlueHandler(core.Handler):
+    def do_POST(self):
+        if self.path not in ("/api/inflation-only", "/api/cancel-local"):
+            return super().do_POST()
+
+        if not self.valid_host() or self.headers.get("X-GWAS-Token") != core.TOKEN:
+            return self.send({"error": "请求校验失败，请刷新页面"}, 403)
+
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 1024 * 1024:
+                raise ValueError("请求过大或为空")
+            data = json.loads(self.rfile.read(length))
+            rid = str(data.get("id", ""))
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", rid):
+                raise ValueError("无效任务编号")
+
+            with core.LOCK:
+                old_run = core.RUNS / rid
+                if not (old_run / "meta.json").exists():
+                    raise ValueError("本地任务不存在")
+                old_meta = json.loads((old_run / "meta.json").read_text("utf-8"))
+
+                if self.path == "/api/cancel-local":
+                    reason = (
+                        "用户已中断/清除本地网页任务状态。"
+                        "此操作不会自动 qdel 服务器队列，也不会删除服务器结果。"
+                    )
+                    (old_run / "cancelled.flag").write_text(reason, "utf-8")
+                    (old_run / "state.txt").write_text("cancelled|" + reason, "utf-8")
+                    return self.send(blue_snapshot(old_run))
+
+                if old_meta.get("remoteDirectoryDeleted"):
+                    raise ValueError("服务器工作目录已删除，不能从已有 .ps 恢复膨胀系数")
+
+                for prior in core.RUNS.iterdir():
+                    if prior == old_run or not (prior / "meta.json").exists():
+                        continue
+                    ps = blue_snapshot(prior)
+                    if ps["status"] in ("running", "connecting"):
+                        raise ValueError("另一个网页任务正在运行。请先停止/核实该任务，再启动“只计算膨胀系数”。")
+
+                if not core.CRT.exists():
+                    raise ValueError("未找到 SecureCRT: " + str(core.CRT))
+
+                old_reason = "已由“只计算膨胀系数”恢复任务接管；旧网页监控状态已停止。"
+                (old_run / "cancelled.flag").write_text(old_reason, "utf-8")
+                (old_run / "state.txt").write_text("cancelled|" + old_reason, "utf-8")
+
+                new_rid = time.strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(4)
+                run = core.RUNS / new_rid
+                run.mkdir()
+
+                src_upload = old_run / "phenotype.upload"
+                if src_upload.exists():
+                    (run / "phenotype.upload").write_bytes(src_upload.read_bytes())
+                else:
+                    (run / "phenotype.upload").write_bytes(b"placeholder\n")
+
+                display = Path(old_meta["filename"]).stem + "_inflationFactor"
+                old_log = Path(old_meta["logPath"])
+                log = core.available_log_path(
+                    old_log.with_name(display + "_" + time.strftime("%Y%m%d-%H%M%S") + ".log")
+                )
+                header = "\n".join([
+                    "GWAS inflation-only run " + new_rid,
+                    "开始时间: " + time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "来源任务: " + rid,
+                    "群体: " + old_meta["population"],
+                    "远程目录: " + core.BASE + "/" + old_meta["directory"],
+                    "归档结果: EMMAx.Result/hIBS/" + Path(old_meta["filename"]).stem,
+                    "模式: 仅使用已有 *.ps 计算 genomic inflation factor；不重新运行 GWAS",
+                ])
+                with log.open("x", encoding="utf-8") as f:
+                    f.write(header)
+
+                meta = dict(old_meta)
+                meta.update(
+                    id=new_rid,
+                    logPath=str(log),
+                    header=header,
+                    displayName=display,
+                    inflationOnlyOf=rid,
+                )
+                (run / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), "utf-8")
+                (run / "bridge.vbs").write_text(_inflation_bridge_script(run, meta), "utf-16")
+                (run / "state.txt").write_text("connecting|启动 SecureCRT；只计算膨胀系数", "utf-8")
+
+                startup = subprocess.STARTUPINFO()
+                startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startup.wShowWindow = 0
+                try:
+                    subprocess.Popen([str(core.CRT), "/SCRIPT", str(run / "bridge.vbs")], startupinfo=startup)
+                except OSError as exc:
+                    (run / "state.txt").write_text("failed|SecureCRT inflation-only launch failed", "utf-8")
+                    raise ValueError("SecureCRT 启动失败: " + str(exc)) from exc
+
+                return self.send(blue_snapshot(run), 201)
+
+        except (ValueError, OSError, TypeError, json.JSONDecodeError) as exc:
+            return self.send({"error": str(exc)}, 400)
+
+
+
 # Patch imported original server runtime.
 core.validate = validate
 core.batch_label = batch_label
 core.phenotype_traits = phenotype_traits
 core.bridge_script = bridge_script
+core.snapshot = blue_snapshot
 core.WORKFLOW = BLUE_WORKFLOW
 
 
@@ -723,9 +942,9 @@ if __name__ == "__main__":
         target=core.mirror_logs, daemon=True
     ).start()
     print(
-        f"GWAS BLUE v9.2 console: http://127.0.0.1:{core.PORT}",
+        f"GWAS BLUE v9.9 console: http://127.0.0.1:{core.PORT}",
         flush=True,
     )
     core.ThreadingHTTPServer(
-        ("127.0.0.1", core.PORT), core.Handler
+        ("127.0.0.1", core.PORT), BlueHandler
     ).serve_forever()

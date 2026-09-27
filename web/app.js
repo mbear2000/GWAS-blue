@@ -318,6 +318,73 @@ function injectInflationStep(){
 }
 injectInflationStep();
 
+function injectRunActionButtons(){
+  if(document.getElementById('inflationOnly'))return;
+
+  const box=document.createElement('div');
+  box.id='runActionButtons';
+  box.style.display='flex';
+  box.style.flexWrap='wrap';
+  box.style.gap='8px';
+  box.style.marginTop='12px';
+  box.innerHTML=`
+    <button type="button" id="inflationOnly" class="secondary" hidden>
+      只计算膨胀系数（使用已有 .ps）
+    </button>
+    <button type="button" id="cancelLocal" class="secondary" hidden>
+      停止本地监控 / 清除运行状态
+    </button>
+  `;
+
+  const recovery=$('recoveryHelp');
+  const host=recovery?.parentElement || $('runInfo')?.parentElement || document.body;
+  host.insertBefore(box,recovery||null);
+
+  $('inflationOnly').onclick=async()=>{
+    const r=runs.find(x=>x.id===selected);
+    if(!r)return;
+    if(!confirm(
+      '将直接读取该任务已归档的 EMMAX output/*.ps 计算膨胀系数，'+
+      '不会重新运行 prepare、qsub、GWAS、绘图或 peak SNP。继续吗？'
+    ))return;
+
+    $('inflationOnly').disabled=true;
+    try{
+      const created=await api('/api/inflation-only',{id:r.id});
+      selected=created.id;
+      message('已启动“只计算膨胀系数”；正在连接 fat2 并复用已有 .ps。');
+      await refresh();
+    }catch(e){
+      message(e.message,true);
+    }finally{
+      $('inflationOnly').disabled=false;
+    }
+  };
+
+  $('cancelLocal').onclick=async()=>{
+    const r=runs.find(x=>x.id===selected);
+    if(!r)return;
+    if(!confirm(
+      '这只会停止/清除 Windows 网页中的本地任务状态。'+
+      '不会自动 qdel 服务器队列，也不会删除服务器结果。'+
+      '请先确认远程任务确实已经中断或不再需要监控。继续吗？'
+    ))return;
+
+    $('cancelLocal').disabled=true;
+    try{
+      await api('/api/cancel-local',{id:r.id});
+      message('本地网页任务状态已标记为“已停止”。');
+      await refresh();
+    }catch(e){
+      message(e.message,true);
+    }finally{
+      $('cancelLocal').disabled=false;
+    }
+  };
+}
+injectRunActionButtons();
+
+
 
 function injectOverwriteUI(){
   if(document.getElementById('overwriteBox'))return;
@@ -524,7 +591,7 @@ $('history').onchange=()=>{
 };
 
 function simpleRunName(run){
-  return (run.filename||'run').replace(/\.[^.]+$/,'');
+  return run.displayName || (run.filename||'run').replace(/\.[^.]+$/,'');
 }
 
 function maybeNotify(run){
@@ -551,6 +618,19 @@ function render(){
   $('recoveryHelp').hidden=!['attention','failed'].includes(run.status);
   $('recover').hidden=!!run.remoteDirectoryDeleted;
 
+  const inflationOnlyBtn=$('inflationOnly');
+  if(inflationOnlyBtn){
+    inflationOnlyBtn.hidden =
+      !!run.remoteDirectoryDeleted ||
+      !['attention','failed','cancelled','complete'].includes(run.status);
+  }
+
+  const cancelLocalBtn=$('cancelLocal');
+  if(cancelLocalBtn){
+    cancelLocalBtn.hidden =
+      !['connecting','running','attention','failed'].includes(run.status);
+  }
+
   const overwriteBox=document.getElementById('overwriteBox');
   if(overwriteBox){
     overwriteBox.hidden=run.status!=='confirm';
@@ -564,6 +644,7 @@ function render(){
   let stage=
     run.detail==='prepare'?0:
     run.detail==='admin'?((run.log.includes('phase=plot')||run.log.includes('PHASE: plot'))?2:1):
+    run.detail==='inflation'?4:
     run.detail==='final'?(
       run.log.includes('INFLATION_FACTOR_START') ||
       run.log.includes('===== GENOMIC INFLATION FACTOR =====')
